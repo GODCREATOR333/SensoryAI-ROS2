@@ -92,29 +92,40 @@ class WebRTCServer(Node):
         try:
             self.get_logger().info(f'Processing frame: format={frame.format.name}, width={frame.width}, height={frame.height}')
             
-            # Output the frame type and properties for debugging
-            self.get_logger().info(f'Frame type: {type(frame)}')
+            # Extract raw data from each plane using the correct method
+            y_plane = np.frombuffer(frame.planes[0].buffer, np.uint8).reshape((frame.planes[0].height, frame.planes[0].line_size))[:, :frame.width]
+            u_plane = np.frombuffer(frame.planes[1].buffer, np.uint8).reshape((frame.planes[1].height, frame.planes[1].line_size))[:, :frame.width // 2]
+            v_plane = np.frombuffer(frame.planes[2].buffer, np.uint8).reshape((frame.planes[2].height, frame.planes[2].line_size))[:, :frame.width // 2]
 
-            # Check if the frame has planes (for YUV or similar formats)
-            if hasattr(frame, 'planes'):
-                self.get_logger().info(f'Frame planes: {len(frame.planes)}')
-                for i, plane in enumerate(frame.planes):
-                    self.get_logger().info(f'Plane {i}: shape={plane.shape if hasattr(plane, "shape") else "No shape"}, dtype={type(plane)}')
-            
-            # Convert the frame to ndarray or string (if possible)
-            try:
-                frame_data = frame.to_ndarray()
-                self.get_logger().info(f'Frame converted to ndarray: shape={frame_data.shape}, dtype={frame_data.dtype}')
-            except Exception as e:
-                self.get_logger().warning(f'Failed to convert frame to ndarray: {str(e)}')
+            self.get_logger().info(f'Reshaped planes - Y: {y_plane.shape}, U: {u_plane.shape}, V: {v_plane.shape}')
 
-            # Output the raw frame data as a string (limited to avoid huge output)
-            frame_str = str(frame)[:500]  # Show first 500 characters of the string representation
-            self.get_logger().info(f'Frame data (as string): {frame_str}')
+            # Upsample the U and V planes to match Y plane size
+            u_upsampled = np.repeat(np.repeat(u_plane, 2, axis=0), 2, axis=1)
+            v_upsampled = np.repeat(np.repeat(v_plane, 2, axis=0), 2, axis=1)
+
+            # Ensure all planes have the same shape
+            y_plane = y_plane[:frame.height, :frame.width]
+            u_upsampled = u_upsampled[:frame.height, :frame.width]
+            v_upsampled = v_upsampled[:frame.height, :frame.width]
+
+            # Stack the planes to create a YUV frame
+            yuv_frame = np.stack([y_plane, u_upsampled, v_upsampled], axis=-1)
+
+            self.get_logger().info(f'Final YUV frame shape: {yuv_frame.shape}')
+
+            # Flatten the YUV frame if needed for FFmpeg
+            flattened_frame = yuv_frame.tobytes()
+
+            # Send to FFmpeg if the process is running
+            if self.ffmpeg_process and not self.ffmpeg_process.stdin.is_closing():
+                self.ffmpeg_process.stdin.write(flattened_frame)
+                await self.ffmpeg_process.stdin.drain()
+
         except Exception as e:
             self.get_logger().error(f'Error processing video frame: {str(e)}')
             import traceback
             self.get_logger().error(f'Traceback: {traceback.format_exc()}')
+
 
 
 
