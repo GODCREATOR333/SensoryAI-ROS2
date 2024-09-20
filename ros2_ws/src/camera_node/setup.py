@@ -19,8 +19,8 @@ setup(
     license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': [
-            'camera_node = camera_node.camera_node:main'
-        ],
-    },
+    'console_scripts': [
+        'camera_node = camera_node.camera_node:main'
+    ],
+},
 )
