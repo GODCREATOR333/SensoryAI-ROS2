@@ -10,6 +10,9 @@ from aiortc import RTCIceCandidate
 import numpy as np
 import cv2 
 import os
+from ultralytics import YOLO
+import time
+
 
 class WebRTCServer(Node):
     def __init__(self):
@@ -21,6 +24,14 @@ class WebRTCServer(Node):
         self.frame_width = None
         self.frame_height = None
         self.fps = 30  # Set the frames per second to a fixed value
+
+        # Load YOLOv8 model
+        self.model = YOLO('yolov8n.pt') 
+
+        # Add a variable to track frame times
+        self.previous_frame_time = time.time()
+        self.frame_count = 0
+
 
     async def handle_offer(self, offer):
         self.get_logger().info('Handling WebRTC offer...')
@@ -88,7 +99,7 @@ class WebRTCServer(Node):
                 self.get_logger().error(f'Error adding ICE candidate: {str(e)}')
         else:
             self.get_logger().warning('Peer connection not established; unable to add ICE candidate')
-    
+
     async def process_frame(self, frame):
         try:
             if self.video_writer is None:
@@ -97,24 +108,36 @@ class WebRTCServer(Node):
                 self.frame_height = frame.height
                 fourcc = cv2.VideoWriter_fourcc(*'XVID')
                 self.video_writer = cv2.VideoWriter(self.output_file, fourcc, self.fps,
-                                                    (self.frame_width, self.frame_height))
+                                                    (self.frame_width, self.frame_height))  # Use original dimensions
                 self.get_logger().info(f'VideoWriter initialized: {self.output_file}')
 
             # Convert YUV to RGB
             img_rgb = frame.to_ndarray(format='rgb24')
-
-            # Convert RGB to BGR for OpenCV (OpenCV uses BGR format)
             img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+
+            # Run YOLOv8 object detection on the original image
+            results = self.model(img_rgb)  # Perform detection
+
+            # Process results and draw bounding boxes and labels
+            for result in results:
+                boxes = result.boxes.xyxy  # Get bounding boxes
+                class_ids = result.boxes.cls  # Get class IDs
+                for box, class_id in zip(boxes, class_ids):
+                    x1, y1, x2, y2 = map(int, box[:4])
+                    label = self.model.names[int(class_id)]  # Use the model's class labels
+
+                    cv2.rectangle(img_bgr, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Draw bounding box
+                    cv2.putText(img_bgr, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)  # Draw label
 
             # Write the frame to disk
             self.video_writer.write(img_bgr)
 
-            self.get_logger().info(f'Frame written to disk: {self.output_file}')
-        
         except Exception as e:
             self.get_logger().error(f'Error processing video frame: {str(e)}')
             import traceback
             self.get_logger().error(f'Traceback: {traceback.format_exc()}')
+
+
 
     def close_video_writer(self):
         """Release the video writer to finalize the video file."""
@@ -125,7 +148,7 @@ class WebRTCServer(Node):
     def on_shutdown(self):
         self.close_video_writer()  # Ensure the video writer is closed when shutting down
 
-
+    
     def on_datachannel(self, channel):
         self.get_logger().info('Data channel established')
         self.data_channel = channel
