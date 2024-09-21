@@ -3,23 +3,24 @@
 import rclpy
 from rclpy.node import Node
 import websockets
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
-from aiortc.contrib.media import MediaBlackhole, MediaPlayer
+from aiortc import RTCPeerConnection, RTCSessionDescription
 import asyncio
 import json
-import cv2
-import numpy as np
 from aiortc import RTCIceCandidate
-import subprocess
-import av 
-
+import numpy as np
+import cv2 
+import os
 
 class WebRTCServer(Node):
     def __init__(self):
         super().__init__('webrtc_server')
         self.peer_connection = None
         self.data_channel = None
-        self.ffmpeg_process = None
+        self.video_writer = None
+        self.output_file = 'output_video.avi'
+        self.frame_width = None
+        self.frame_height = None
+        self.fps = 30  # Set the frames per second to a fixed value
 
     async def handle_offer(self, offer):
         self.get_logger().info('Handling WebRTC offer...')
@@ -90,73 +91,40 @@ class WebRTCServer(Node):
     
     async def process_frame(self, frame):
         try:
-            self.get_logger().info(f'Processing frame: format={frame.format.name}, width={frame.width}, height={frame.height}')
-            
-            # Extract raw data from each plane using the correct method
-            y_plane = np.frombuffer(frame.planes[0].buffer, np.uint8).reshape((frame.planes[0].height, frame.planes[0].line_size))[:, :frame.width]
-            u_plane = np.frombuffer(frame.planes[1].buffer, np.uint8).reshape((frame.planes[1].height, frame.planes[1].line_size))[:, :frame.width // 2]
-            v_plane = np.frombuffer(frame.planes[2].buffer, np.uint8).reshape((frame.planes[2].height, frame.planes[2].line_size))[:, :frame.width // 2]
+            if self.video_writer is None:
+                # Initialize video writer once we receive the first frame
+                self.frame_width = frame.width
+                self.frame_height = frame.height
+                fourcc = cv2.VideoWriter_fourcc(*'XVID')
+                self.video_writer = cv2.VideoWriter(self.output_file, fourcc, self.fps,
+                                                    (self.frame_width, self.frame_height))
+                self.get_logger().info(f'VideoWriter initialized: {self.output_file}')
 
-            self.get_logger().info(f'Reshaped planes - Y: {y_plane.shape}, U: {u_plane.shape}, V: {v_plane.shape}')
+            # Convert YUV to RGB
+            img_rgb = frame.to_ndarray(format='rgb24')
 
-            # Upsample the U and V planes to match Y plane size
-            u_upsampled = np.repeat(np.repeat(u_plane, 2, axis=0), 2, axis=1)
-            v_upsampled = np.repeat(np.repeat(v_plane, 2, axis=0), 2, axis=1)
+            # Convert RGB to BGR for OpenCV (OpenCV uses BGR format)
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-            # Ensure all planes have the same shape
-            y_plane = y_plane[:frame.height, :frame.width]
-            u_upsampled = u_upsampled[:frame.height, :frame.width]
-            v_upsampled = v_upsampled[:frame.height, :frame.width]
+            # Write the frame to disk
+            self.video_writer.write(img_bgr)
 
-            # Stack the planes to create a YUV frame
-            yuv_frame = np.stack([y_plane, u_upsampled, v_upsampled], axis=-1)
-
-            self.get_logger().info(f'Final YUV frame shape: {yuv_frame.shape}')
-
-            # Flatten the YUV frame if needed for FFmpeg
-            flattened_frame = yuv_frame.tobytes()
-
-            # Send to FFmpeg if the process is running
-            if self.ffmpeg_process and not self.ffmpeg_process.stdin.is_closing():
-                self.ffmpeg_process.stdin.write(flattened_frame)
-                await self.ffmpeg_process.stdin.drain()
-
+            self.get_logger().info(f'Frame written to disk: {self.output_file}')
+        
         except Exception as e:
             self.get_logger().error(f'Error processing video frame: {str(e)}')
             import traceback
             self.get_logger().error(f'Traceback: {traceback.format_exc()}')
 
+    def close_video_writer(self):
+        """Release the video writer to finalize the video file."""
+        if self.video_writer is not None:
+            self.video_writer.release()
+            self.get_logger().info(f'Video file written to: {os.path.abspath(self.output_file)}')
 
+    def on_shutdown(self):
+        self.close_video_writer()  # Ensure the video writer is closed when shutting down
 
-
-
-    async def start_ffmpeg(self, width, height):
-        try:
-            command = [
-                'ffmpeg',
-                '-f', 'rawvideo',
-                '-pixel_format', 'yuv420p',
-                '-video_size', f'{width}x{height}',
-                '-framerate', '30',
-                '-i', '-',
-                '-c:v', 'libx264',
-                '-preset', 'ultrafast',
-                '-tune', 'zerolatency',
-                '-f', 'flv',
-                'rtmp://localhost/live/stream'
-            ]
-            self.get_logger().info(f'Starting FFmpeg with command: {" ".join(command)}')
-            self.ffmpeg_process = await asyncio.create_subprocess_exec(
-                *command,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            self.get_logger().info('FFmpeg process started successfully')
-        except Exception as e:
-            self.get_logger().error(f'Error starting FFmpeg: {str(e)}')
-            import traceback
-            self.get_logger().error(f'Traceback: {traceback.format_exc()}')
 
     def on_datachannel(self, channel):
         self.get_logger().info('Data channel established')
